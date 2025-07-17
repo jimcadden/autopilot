@@ -1,55 +1,57 @@
-# Network Validation Tests
+# Network Health Checks
 
-Autopilot provides two network validation tests:
+## Purpose
 
-- Reachability: runs `ping` against all network interfaces available in all the Autopilot pods
-- Bandwidth: runs `iperf3` to validate the network bandwidth available.
+The network health checks are designed to validate the connectivity and performance of the network interfaces on each node. In a distributed system, reliable and high-performance networking is critical for application performance and stability. These checks help ensure that nodes can communicate with each other effectively and that the network bandwidth meets the expected performance targets.
 
-## Iperf
+Autopilot provides two main types of network validation tests:
 
-This test, in it's current form, is primarily for running `TCP` `data plane` `port-to-port` network workloads to gather key performance statistics. This performs a `Ring Traversal` (or as we call it, a `ring workload`) through all network interfaces (net1-X interfaces) at varying intensity (number of simultaneous client & servers per interface). In future versions of Autopilot, more workloads and customization to the workloads may be provided.
+*   **Reachability**: Runs `ping` to verify basic connectivity between all Autopilot pods.
+*   **Bandwidth**: Uses `iperf3` to measure the actual network throughput between nodes.
 
-### Ring workload
-A "Ring Workload", in our case is similar the commonly known "Ring Topology" such that the execution calls flow sequentially in a   particular _direction_ that forms a "ring" like pattern. _Most importantly, none of the the compute infrastructure is actually configured in a ring, we merely develop workloads that resemble a ring pattern._ The motivation for these workloads is to achieve full line rate throughput on a port-by-port (in our case network interfaces net1-X) basis for a single logical cluster.
+## Components
 
-Assume we have the following set of nodes `[A,B,C]`.  We can create a `ring` starting from node `A` that flows to the direction of `C`:
+The network health checks are composed of several Python scripts that work together to orchestrate the tests.
 
-```console
-A -> B
-B -> C
-C -> A
-```
+*   **[`ping-entrypoint.py`](./ping-entrypoint.py)**: This is the entrypoint for the `ping`-based reachability test. It discovers all other Autopilot pods in the cluster and performs a `ping` to each of them to ensure they are reachable.
 
-In our case, a "Ring Workload" will exhaust all starting pointings. We call these iterations, `timesteps`. In a compute infrastructure with `n` number of nodes, we can say there will be `n-1` total timesteps. Said differently, there's `n-1` possible starting points that form a ring such that no node flows to itself.  Each of the pairs of execution in a given timestep will execute in parallel.
+*   **[`iperf3_entrypoint.py`](./iperf3_entrypoint.py)**: This is the main entrypoint for the `iperf3`-based bandwidth tests. It coordinates the process of starting `iperf3` servers and clients across the cluster.
 
-```console
-Timestep 1:
-------------
-A -> B
-B -> C
-C -> A
+*   **[`iperf3_start_servers.py`](./iperf3_start_servers.py)**: This script is responsible for starting one or more `iperf3` servers on the node, listening on specified ports.
 
-Timestep 2:
-------------
-A -> C
-B -> A
-C -> B
-```
+*   **[`iperf3_start_clients.py`](./iperf3_start_clients.py)**: This script starts the `iperf3` clients, which connect to the `iperf3` servers on other nodes to perform the bandwidth test.
 
-As part of this workload, Autopilot will generate the Ring Workload and then start `iperf3 servers` on each interface on each Autopilot pod based on the configuration options provided by the user.  Only after the `iperf3 servers` are started, Autopilot will begin executing the workload by starting `iperf3 clients` based on the configuration options provided by the user. All results are logged back to the user.
+*   **[`iperf3_stop_servers.py`](./iperf3_stop_servers.py)**: After the tests are complete, this script is used to gracefully shut down the `iperf3` servers.
 
-For each network interface on each node, an `iperf3 server` is started. The number of `iperf3 servers` is dependent on the `number of clients` intended on being run. For example, if the  `number of clients` is `8`, then there will be `8` `iperf3 servers` started per interface on a unique `port`.
+## Usage
 
-For each timestep, all `pairs` are executed simultaneously. For each pair some `number of clients` are started in parallel and will run for `5 seconds` using `zero-copies` against a respective `iperf3 server`
+The network health checks can be invoked via the `autopilot-daemon`'s HTTP API.
 
-Metrics such `minimum`, `maximum`, `mean`, `aggregate` bitrates and transfers are tracked for both the `sender` and the `receiver` for each `client -> server` execution. The results are stored both as `JSON` in the respective `pod` as well as summarized and dumped into the `pod logs`.
+### Ping Test
 
-Invocation from the exposed Autopilot API is as follows below:
+To run the `ping` test, you can send a request to the `/status` endpoint with `check=ping`.
 
 ```bash
-    # Invoked via the `status` handle:
-curl "http://127.0.0.1:3333/status?check=iperf&workload=ring&pclients=<NUMBER_OF_IPERF3_CLIENTS>&startport=<STARTING_IPERF3_SERVER_PORT>"
-
-    # Invoked via the `iperf` handle directly:
-curl "http://127.0.0.1:3333/iperf?workload=ring&pclients=<NUMBER_OF_IPERF3_CLIENTS>&startport=<STARTING_IPERF3_SERVER_PORT>"
+curl "http://127.0.0.1:3333/status?check=ping"
 ```
+
+This will trigger the `ping-entrypoint.py` script and report the reachability status of all nodes.
+
+### Iperf3 Bandwidth Test
+
+The `iperf3` test is more complex and involves a "ring workload" pattern to test bandwidth between all pairs of nodes.
+
+#### Ring Workload
+
+A "Ring Workload" is a testing pattern where traffic flows sequentially from one node to the next, forming a logical ring. For a set of nodes `[A, B, C]`, the traffic pattern would be `A -> B`, `B -> C`, and `C -> A`. This is done to systematically test the throughput of each network interface in the cluster.
+
+To run the `iperf3` ring workload, you can use the following `curl` command:
+
+```bash
+curl "http://127.0.0.1:3333/iperf?workload=ring&pclients=<NUM_CLIENTS>&startport=<START_PORT>"
+```
+
+*   `pclients`: The number of parallel `iperf3` clients to run for each connection.
+*   `startport`: The starting port number for the `iperf3` servers.
+
+The results, including `minimum`, `maximum`, `mean`, and `aggregate` bitrates, are logged by the `autopilot-daemon` pod and can be used to identify network performance issues.
